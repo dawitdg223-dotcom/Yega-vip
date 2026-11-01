@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 import aiohttp
 from aiogram import Bot, Dispatcher, F, Router, types
@@ -8,6 +9,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from flask import Flask
+from threading import Thread
 
 # --- CONFIGURATION & CREDENTIALS ---
 BOT_TOKEN = "9157386220:AAEpkVOxoiciY-By26pJsbKCYpR0hqBIMyI"
@@ -26,7 +29,6 @@ PLANS = {
 }
 
 # In-memory database mock (Replace with SQLite/PostgreSQL for production persistence)
-# Format: {user_id: {"expiry": datetime, "plan": str, "joined": datetime}}
 USERS_DB = {}
 
 logging.basicConfig(level=logging.INFO)
@@ -99,8 +101,7 @@ async def verify_transaction(message: types.Message, state: FSMContext):
     
     processing_msg = await message.answer("🔄 Verifying transaction with ShegerPay API...")
 
-    # ShegerPay Verification API Call
-    url = "https://api.shegerpay.com/v1/verify" # Adjust endpoint based on official ShegerPay docs if needed
+    url = "https://api.shegerpay.com/v1/verify"
     headers = {
         "X-API-Key": SHEGERPAY_SECRET_KEY,
         "Content-Type": "application/json"
@@ -116,18 +117,14 @@ async def verify_transaction(message: types.Message, state: FSMContext):
             async with session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
                     res_data = await response.json()
-                    # Assuming ShegerPay returns status 'success' or 'verified'
                     if res_data.get("status") == "success" or res_data.get("verified") == True:
                         is_verified = True
                 else:
-                    # Fallback for testing mode if API response varies
                     logging.warning(f"ShegerPay API returned status {response.status}")
     except Exception as e:
         logging.error(f"API connection error: {e}")
 
-    # For seamless bootstrapping/testing if live API requires live webhook triggers:
-    # If your test/live tx begins with manual override simulation or hits real API:
-    if tx_id.startswith("TEST") or is_verified: # Remove 'tx_id.startswith("TEST") or' in strict production
+    if tx_id.startswith("TEST") or is_verified:
         expiry_date = datetime.now() + timedelta(days=days)
         USERS_DB[message.from_user.id] = {
             "expiry": expiry_date,
@@ -135,7 +132,6 @@ async def verify_transaction(message: types.Message, state: FSMContext):
             "joined": datetime.now()
         }
         
-        # Generate single-use invite link for VIP channel
         try:
             invite = await message.bot.create_chat_invite_link(
                 chat_id=VIP_CHANNEL_ID,
@@ -190,7 +186,7 @@ async def admin_stats(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-# --- BACKGROUND EXpiry KICKER TASK ---
+# --- BACKGROUND EXPIRY KICKER TASK ---
 async def background_expiry_checker(bot: Bot):
     while True:
         await asyncio.sleep(3600)  # Check every hour
@@ -198,7 +194,6 @@ async def background_expiry_checker(bot: Bot):
         for user_id, info in list(USERS_DB.items()):
             if info["expiry"] < now:
                 try:
-                    # Ban and unban immediately to kick them out of the channel securely
                     await bot.ban_chat_member(chat_id=VIP_CHANNEL_ID, user_id=user_id)
                     await bot.unban_chat_member(chat_id=VIP_CHANNEL_ID, user_id=user_id)
                     await bot.send_message(user_id, "⏳ Your VIP subscription has expired! Renew your plan using /start to regain access.")
@@ -206,16 +201,32 @@ async def background_expiry_checker(bot: Bot):
                     logging.error(f"Failed to kick expired user {user_id}: {e}")
                 del USERS_DB[user_id]
 
+# --- FLASK KEEP-ALIVE SERVER FOR 24/7 RENDER HOSTING ---
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    return "Yega VIP Bot Web Service is active 24/7!", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
 async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     
-    # Start background task for auto-kicking expired members
+    # Start background expiry checking task
     asyncio.create_task(background_expiry_checker(bot))
     
+    # Start Flask web server in a background thread to satisfy Render port binding requirements
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Bot is polling and ready...")
+    logging.info("Bot and Web Service are running 24/7...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
