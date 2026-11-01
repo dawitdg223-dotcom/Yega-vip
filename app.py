@@ -18,17 +18,17 @@ ADMIN_ID = 5287278470
 SHEGERPAY_SECRET_KEY = "sk_live_Wvbhzuk9fMj8otot_wpszXmn-ecHZrpc"
 SHEGERPAY_PUBLIC_KEY = "pk_live_eGg_nWFqkffUd7uYUaX6TeUeHj4Wm_8c"
 
-# Replace this with your actual private VIP channel ID (e.g., -1001234567890)
+# Replace with your actual private VIP channel ID (e.g., -1001234567890)
 VIP_CHANNEL_ID = -1001234567890  
 
 # Pricing Map (in Birr)
 PLANS = {
-    "daily": {"name": "Daily Pass (1 days)", "price": 15, "days": 1},
+    "daily": {"name": "Daily Pass (1 day)", "price": 15, "days": 1},
     "weekly": {"name": "Weekly Pass (7 days)", "price": 50, "days": 7},
     "monthly": {"name": "Monthly Pass (30 days)", "price": 300, "days": 30},
 }
 
-# In-memory database mock (Replace with SQLite/PostgreSQL for production persistence)
+# In-memory database mock
 USERS_DB = {}
 
 logging.basicConfig(level=logging.INFO)
@@ -37,20 +37,28 @@ router = Router()
 class PaymentStates(StatesGroup):
     waiting_for_tx_id = State()
 
-# --- USER COMMANDS & MENUS ---
+# --- MAIN USER MENU & START ---
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
+    user_name = message.from_user.first_name
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="🟢 Daily Pass — 15 Birr", callback_data="buy_daily"))
-    builder.row(types.InlineKeyboardButton(text="🔵 Weekly Pass — 50 Birr (Best Value)", callback_data="buy_weekly"))
-    builder.row(types.InlineKeyboardButton(text="🟡 Monthly Pass — 300 Birr", callback_data="buy_monthly"))
-    builder.row(types.InlineKeyboardButton(text="📊 Check My Subscription", callback_data="check_status"))
+    
+    # Smooth, structured layout
+    builder.row(
+        types.InlineKeyboardButton(text="🟢 Daily — 15 Birr", callback_data="buy_daily"),
+        types.InlineKeyboardButton(text="🔵 Weekly — 50 Birr", callback_data="buy_weekly")
+    )
+    builder.row(types.InlineKeyboardButton(text="🟡 Monthly Pass — 300 Birr (Best Value)", callback_data="buy_monthly"))
+    builder.row(
+        types.InlineKeyboardButton(text="📊 My Status", callback_data="check_status"),
+        types.InlineKeyboardButton(text="📞 Support", url="https://t.me/dawitdg223")
+    )
 
     welcome_text = (
-        "⚽ **Welcome to VIP Betting Tips Bot!**\n\n"
-        "Get high-accuracy football multi-bets, accumulators, and expert predictions daily.\n\n"
-        "👇 **Choose your VIP access plan below:**"
+        f"👋 Welcome, **{user_name}** to **Yega VIP Bot**!\n\n"
+        "⚽ Your trusted source for high-accuracy football multi-bets, accumulators, and expert insights.\n\n"
+        "👇 **Choose a VIP plan below to get started:**"
     )
     await message.answer(welcome_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
@@ -59,12 +67,12 @@ async def check_status(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     if user_id in USERS_DB and USERS_DB[user_id]["expiry"] > datetime.now():
         expiry_str = USERS_DB[user_id]["expiry"].strftime("%Y-%m-%d %H:%M")
-        await callback.message.answer(f"✅ Your VIP status is **ACTIVE**.\nExpires on: `{expiry_str}`", parse_mode="Markdown")
+        await callback.message.answer(f"✅ Your VIP status is **ACTIVE**.\nExpires on: `{expiry_str}` EAT", parse_mode="Markdown")
     else:
-        await callback.message.answer("❌ You do not have an active VIP subscription. Choose a plan from /start to join!")
+        await callback.message.answer("❌ You do not have an active VIP subscription. Select a plan from /start to join!")
     await callback.answer()
 
-# --- PAYMENT FLOW ---
+# --- PAYMENT FLOW & INSTRUCTIONS ---
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
@@ -74,22 +82,43 @@ async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     await state.update_data(plan_key=plan_key, price=plan["price"], days=plan["days"])
     
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="✍️ Enter Transaction ID", callback_data="enter_tx"))
+    builder.row(types.InlineKeyboardButton(text="✍️ I Have Paid — Enter Transaction ID", callback_data="enter_tx"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ Back to Plans", callback_data="back_to_start"))
     
     instructions = (
-        f"💳 **Selected Plan: {plan['name']}**\n"
-        f"💰 **Amount to Pay:** {plan['price']} Birr\n\n"
-        f"1️⃣ Complete your payment via Telebirr or ShegerPay gateway.\n"
-        f"2️⃣ Once complete, copy your **Transaction ID** (e.g., FT26...)\n"
-        f"3️⃣ Click the button below to submit your code for instant verification!"
+        f"💳 **Selected Plan:** {plan['name']}\n"
+        f"💰 **Amount to Pay:** `{plan['price']} Birr`\n\n"
+        f"📱 **How to Pay via Telebirr:**\n"
+        f"• Send **{plan['price']} Birr** to Telebirr Account: `09XXXXXXXX` (Dawit Getachew)\n"
+        f"  *(Or use your Commercial Bank of Ethiopia mobile app/USSD)*\n\n"
+        f"1️⃣ Complete the transfer.\n"
+        f"2️⃣ Copy your **Transaction ID / SMS Code** (e.g., FT26...)\n"
+        f"3️⃣ Tap the button below to submit your code!"
     )
-    await callback.message.answer(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await callback.message.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_start")
+async def back_to_start(callback: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        types.InlineKeyboardButton(text="🟢 Daily — 15 Birr", callback_data="buy_daily"),
+        types.InlineKeyboardButton(text="🔵 Weekly — 50 Birr", callback_data="buy_weekly")
+    )
+    builder.row(types.InlineKeyboardButton(text="🟡 Monthly Pass — 300 Birr", callback_data="buy_monthly"))
+    builder.row(types.InlineKeyboardButton(text="📊 My Status", callback_data="check_status"))
+    
+    await callback.message.edit_text(
+        "⚽ **Welcome back to Yega VIP Bot!**\n\nChoose your VIP access plan below:",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
     await callback.answer()
 
 @router.callback_query(F.data == "enter_tx")
 async def ask_for_tx(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(PaymentStates.waiting_for_tx_id)
-    await callback.message.answer("📥 Please reply with your **Transaction ID / Reference Code** right here in chat:")
+    await callback.message.answer("📥 Please reply right here in chat with your **Transaction ID / Reference Code**:")
     await callback.answer()
 
 @router.message(PaymentStates.waiting_for_tx_id)
@@ -99,7 +128,7 @@ async def verify_transaction(message: types.Message, state: FSMContext):
     expected_amount = data.get("price")
     days = data.get("days")
     
-    processing_msg = await message.answer("🔄 Verifying transaction with ShegerPay API...")
+    processing_msg = await message.answer("🔄 Verifying transaction with gateway...")
 
     url = "https://api.shegerpay.com/v1/verify"
     headers = {
@@ -119,11 +148,10 @@ async def verify_transaction(message: types.Message, state: FSMContext):
                     res_data = await response.json()
                     if res_data.get("status") == "success" or res_data.get("verified") == True:
                         is_verified = True
-                else:
-                    logging.warning(f"ShegerPay API returned status {response.status}")
     except Exception as e:
         logging.error(f"API connection error: {e}")
 
+    # Allows testing with 'TEST' or actual verified gateway response
     if tx_id.startswith("TEST") or is_verified:
         expiry_date = datetime.now() + timedelta(days=days)
         USERS_DB[message.from_user.id] = {
@@ -152,11 +180,11 @@ async def verify_transaction(message: types.Message, state: FSMContext):
     else:
         await processing_msg.edit_text(
             "❌ **Verification Failed.**\n"
-            "We couldn't confirm this transaction ID or the amount didn't match. Please check your Telebirr SMS and try again or contact support."
+            " We couldn't confirm this transaction ID or the amount didn't match. Please check your SMS code and try again or contact @dawitdg223."
         )
         await state.clear()
 
-# --- ADMIN PANEL ---
+# --- ADMIN PANEL & MANAGEMENT ---
 
 @router.message(Command("admin"))
 async def admin_panel(message: types.Message):
@@ -164,10 +192,10 @@ async def admin_panel(message: types.Message):
         return
     
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="👥 View Stats & Revenue", callback_data="admin_stats"))
-    builder.row(types.InlineKeyboardButton(text="📢 Broadcast Message", callback_data="admin_broadcast"))
+    builder.row(types.InlineKeyboardButton(text="📊 View Stats & Revenue", callback_data="admin_stats"))
+    builder.row(types.InlineKeyboardButton(text="👥 List Active Users", callback_data="admin_users"))
     
-    await message.answer("👑 **Welcome to the Admin Control Panel**", reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await message.answer("👑 **Admin Control Panel**\nSelect an action:", reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats(callback: types.CallbackQuery):
@@ -177,13 +205,44 @@ async def admin_stats(callback: types.CallbackQuery):
     active_users = sum(1 for uid in USERS_DB if USERS_DB[uid]["expiry"] > datetime.now())
     total_revenue = sum(PLANS[USERS_DB[uid]["plan"]]["price"] for uid in USERS_DB if USERS_DB[uid]["expiry"] > datetime.now())
     
-    await callback.message.answer(
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="⬅️ Back to Admin Menu", callback_data="admin_back"))
+    
+    await callback.message.edit_text(
         "📊 **Bot Statistics Dashboard**\n\n"
         f"👥 Active VIP Subscribers: `{active_users}`\n"
         f"💰 Estimated Active Revenue: `{total_revenue} Birr`\n"
-        f"📂 Total Registered Users in DB: `{len(USERS_DB)}`",
+        f"📂 Total Users in Memory DB: `{len(USERS_DB)}`",
+        reply_markup=builder.as_markup(),
         parse_mode="Markdown"
     )
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_users")
+async def admin_users(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    
+    active_list = [f"• User ID: `{uid}` | Plan: `{info['plan']}` | Exp: `{info['expiry'].strftime('%m-%d %H:%M')}`" 
+                   for uid, info in USERS_DB.items() if info["expiry"] > datetime.now()]
+    
+    text = "👥 **Active Subscribers List:**\n\n" + ("\n".join(active_list) if active_list else "No active subscribers right now.")
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="⬅️ Back to Admin Menu", callback_data="admin_back"))
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_back")
+async def admin_back(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="📊 View Stats & Revenue", callback_data="admin_stats"))
+    builder.row(types.InlineKeyboardButton(text="👥 List Active Users", callback_data="admin_users"))
+    
+    await callback.message.edit_text("👑 **Admin Control Panel**\nSelect an action:", reply_markup=builder.as_markup(), parse_mode="Markdown")
     await callback.answer()
 
 # --- BACKGROUND EXPIRY KICKER TASK ---
