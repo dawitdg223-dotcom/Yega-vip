@@ -7,15 +7,13 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.fsm.state import State, StatesGroup
 from flask import Flask
 from threading import Thread
 
 # --- CONFIGURATION & CREDENTIALS ---
 BOT_TOKEN = "9157386220:AAEpkVOxoiciY-By26pJsbKCYpR0hqBIMyI"
 ADMIN_ID = 5287278470
-
-# Your fixed 50 ETB ShegerPay Payment Link
-SHEGERPAY_LINK = "https://pay.shegerpay.com/wG9Woidfb19Hsc4i"
 
 # Replace with your actual private VIP channel ID (e.g., -1001234567890)
 VIP_CHANNEL_ID = -1001234567890  
@@ -31,10 +29,15 @@ USERS_DB = {}
 logging.basicConfig(level=logging.INFO)
 router = Router()
 
+# FSM States for receipt submission
+class PaymentState(StatesGroup):
+    waiting_for_receipt = State()
+
 # --- MAIN USER MENU & START ---
 
 @router.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
     user_name = message.from_user.first_name
     builder = InlineKeyboardBuilder()
     
@@ -48,7 +51,7 @@ async def cmd_start(message: types.Message):
         f"👋 Welcome, **{user_name}** to **Yega VIP Bot**!\n\n"
         "⚽ Your trusted source for high-accuracy football multi-bets, accumulators, and expert insights.\n\n"
         "🔥 **Get full access to our exclusive VIP channel for 7 days!**\n\n"
-        "👇 Tap the button below to get started:"
+        "👇 Tap the button below to start:"
     )
     await message.answer(welcome_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
@@ -62,29 +65,29 @@ async def check_status(callback: types.CallbackQuery):
     else:
         await callback.message.answer("❌ You do not have an active VIP subscription. Tap /start to join!")
 
-# --- PAYMENT LINK HANDLER ---
+# --- PAYMENT FLOW HANDLER ---
 
 @router.callback_query(F.data == "buy_vip")
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
+    await state.set_state(PaymentState.waiting_for_receipt)
 
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="💳 Pay 50 Birr via ShegerPay", url=SHEGERPAY_LINK))
-    builder.row(types.InlineKeyboardButton(text="✅ I Have Paid — Verify Access", callback_data="verify_pay"))
-    builder.row(types.InlineKeyboardButton(text="⬅️ Back to Menu", callback_data="back_to_start"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ Cancel & Back", callback_data="back_to_start"))
 
     instructions = (
         f"⭐ **Plan:** {PLAN_NAME}\n"
         f"💰 **Price:** `{PLAN_PRICE} Birr`\n\n"
-        f"1️⃣ Tap **'Pay 50 Birr via ShegerPay'** below to open your checkout page.\n"
-        f"2️⃣ Complete your payment safely.\n"
-        f"3️⃣ Come back here and tap **'I Have Paid — Verify Access'** to receive your private invite link!"
+        "🔒 **Private Direct Transfer Instructions:**\n"
+        "Please transfer **50 ETB** to our secure account, then send your **Telebirr Transaction ID** or receipt text right here in the chat.\n\n"
+        "👇 *Type and send your Transaction ID below:*"
     )
     
     await callback.message.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 @router.callback_query(F.data == "back_to_start")
-async def back_to_start(callback: types.CallbackQuery):
+async def back_to_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
     await callback.answer()
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="⭐ Get Weekly VIP Pass — 50 Birr", callback_data="buy_vip"))
@@ -99,19 +102,23 @@ async def back_to_start(callback: types.CallbackQuery):
     except Exception:
         pass
 
-@router.callback_query(F.data == "verify_pay")
-async def manual_verify_link_payment(callback: types.CallbackQuery):
-    await callback.answer("Verifying payment...", show_alert=False)
-    user_id = callback.from_user.id
+@router.message(PaymentState.waiting_for_receipt)
+async def receive_receipt(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    receipt_text = message.text.strip()
     
+    # Automatically grant access upon receipt submission
     expiry_date = datetime.now() + timedelta(days=PLAN_DAYS)
     USERS_DB[user_id] = {
         "expiry": expiry_date,
+        "receipt": receipt_text,
         "joined": datetime.now()
     }
     
+    await state.clear()
+    
     try:
-        invite = await callback.bot.create_chat_invite_link(
+        invite = await message.bot.create_chat_invite_link(
             chat_id=VIP_CHANNEL_ID,
             member_limit=1,
             expire_date=datetime.now() + timedelta(hours=1)
@@ -120,8 +127,8 @@ async def manual_verify_link_payment(callback: types.CallbackQuery):
     except Exception:
         invite_link = "https://t.me/+YourVIPChannelInviteBackupLink"
 
-    await callback.message.edit_text(
-        "✅ **Payment Confirmed!**\n\n"
+    await message.answer(
+        "✅ **Receipt Received & Verified!**\n\n"
         f"Your VIP access for **{PLAN_NAME}** is active until: `{expiry_date.strftime('%Y-%m-%d %H:%M')}`\n\n"
         f"🚀 **Join your VIP Channel here:**\n{invite_link}",
         parse_mode="Markdown"
@@ -167,7 +174,7 @@ async def admin_users(callback: types.CallbackQuery):
         return
     await callback.answer()
     
-    active_list = [f"• User ID: `{uid}` | Exp: `{info['expiry'].strftime('%m-%d %H:%M')}`" 
+    active_list = [f"• User ID: `{uid}` | Receipt: `{info.get('receipt', 'N/A')}` | Exp: `{info['expiry'].strftime('%m-%d %H:%M')}`" 
                    for uid, info in USERS_DB.items() if info["expiry"] > datetime.now()]
     
     text = "👥 **Active Subscribers List:**\n\n" + ("\n".join(active_list) if active_list else "No active subscribers right now.")
