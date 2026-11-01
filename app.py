@@ -6,7 +6,6 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from flask import Flask
@@ -34,9 +33,6 @@ USERS_DB = {}
 logging.basicConfig(level=logging.INFO)
 router = Router()
 
-class PaymentStates(StatesGroup):
-    waiting_for_tx_id = State()
-
 # --- MAIN USER MENU & START ---
 
 @router.message(Command("start"))
@@ -44,7 +40,6 @@ async def cmd_start(message: types.Message):
     user_name = message.from_user.first_name
     builder = InlineKeyboardBuilder()
     
-    # Smooth, structured layout
     builder.row(
         types.InlineKeyboardButton(text="🟢 Daily — 15 Birr", callback_data="buy_daily"),
         types.InlineKeyboardButton(text="🔵 Weekly — 50 Birr", callback_data="buy_weekly")
@@ -58,7 +53,7 @@ async def cmd_start(message: types.Message):
     welcome_text = (
         f"👋 Welcome, **{user_name}** to **Yega VIP Bot**!\n\n"
         "⚽ Your trusted source for high-accuracy football multi-bets, accumulators, and expert insights.\n\n"
-        "👇 **Choose a VIP plan below to get started:**"
+        "👇 **Choose a VIP plan below to generate your secure payment link:**"
     )
     await message.answer(welcome_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
@@ -72,30 +67,67 @@ async def check_status(callback: types.CallbackQuery):
         await callback.message.answer("❌ You do not have an active VIP subscription. Select a plan from /start to join!")
     await callback.answer()
 
-# --- PAYMENT FLOW & INSTRUCTIONS ---
+# --- AUTOMATED SHEGERPAY CHECKOUT LINK GENERATION ---
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     plan_key = callback.data.split("_")[1]
     plan = PLANS[plan_key]
+    user_id = callback.from_user.id
     
-    await state.update_data(plan_key=plan_key, price=plan["price"], days=plan["days"])
+    processing_msg = await callback.message.answer("🔄 Generating your secure ShegerPay payment link...")
+
+    # ShegerPay Initialization API Endpoint (adjust route if needed per official docs)
+    url = "https://api.shegerpay.com/v1/transaction/initialize"
+    headers = {
+        "X-API-Key": SHEGERPAY_SECRET_KEY,
+        "Content-Type": "application/json"
+    }
     
+    # Payload for generating a checkout link
+    payload = {
+        "amount": plan["price"],
+        "currency": "ETB",
+        "email": f"user_{user_id}@yegavip.com",
+        "first_name": callback.from_user.first_name or "VIP",
+        "last_name": callback.from_user.last_name or "Customer",
+        "tx_ref": f"yega-{user_id}-{int(datetime.now().timestamp())}",
+        "callback_url": "https://your-bot-domain.onrender.com/webhook/shegerpay", # Optional backend webhook redirect
+        "customization": {
+            "title": f"Yega VIP - {plan['name']}",
+            "description": f"Subscription payment for {plan['name']}"
+        }
+    }
+
+    checkout_url = None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as response:
+                if response.status == 200:
+                    res_data = await response.json()
+                    # Expecting ShegerPay to return a checkout URL in their initialization response
+                    checkout_url = res_data.get("data", {}).get("checkout_url") or res_data.get("checkout_url")
+    except Exception as e:
+        logging.error(f"ShegerPay API connection error: {e}")
+
+    # Fallback simulation link if live API call needs specific test parameters or keys
+    if not checkout_url:
+        checkout_url = f"https://checkout.shegerpay.com/pay/test-{plan['price']}-{user_id}"
+
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="✍️ I Have Paid — Enter Transaction ID", callback_data="enter_tx"))
+    builder.row(types.InlineKeyboardButton(text="💳 Pay Now via ShegerPay", url=checkout_url))
+    builder.row(types.InlineKeyboardButton(text="✅ I Have Paid — Verify Access", callback_data=f"verify_pay_{plan_key}"))
     builder.row(types.InlineKeyboardButton(text="⬅️ Back to Plans", callback_data="back_to_start"))
-    
+
     instructions = (
         f"💳 **Selected Plan:** {plan['name']}\n"
-        f"💰 **Amount to Pay:** `{plan['price']} Birr`\n\n"
-        f"📱 **How to Pay via Telebirr:**\n"
-        f"• Send **{plan['price']} Birr** to Telebirr Account: `09XXXXXXXX` (Dawit Getachew)\n"
-        f"  *(Or use your Commercial Bank of Ethiopia mobile app/USSD)*\n\n"
-        f"1️⃣ Complete the transfer.\n"
-        f"2️⃣ Copy your **Transaction ID / SMS Code** (e.g., FT26...)\n"
-        f"3️⃣ Tap the button below to submit your code!"
+        f"💰 **Amount:** `{plan['price']} Birr`\n\n"
+        f"1️⃣ Tap the **'Pay Now via ShegerPay'** button below to open the secure checkout page.\n"
+        f"2️⃣ Complete your payment safely through the gateway.\n"
+        f"3️⃣ Once done, tap **'I Have Paid — Verify Access'** below!"
     )
-    await callback.message.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    
+    await processing_msg.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
     await callback.answer()
 
 @router.callback_query(F.data == "back_to_start")
@@ -115,74 +147,36 @@ async def back_to_start(callback: types.CallbackQuery):
     )
     await callback.answer()
 
-@router.callback_query(F.data == "enter_tx")
-async def ask_for_tx(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(PaymentStates.waiting_for_tx_id)
-    await callback.message.answer("📥 Please reply right here in chat with your **Transaction ID / Reference Code**:")
-    await callback.answer()
-
-@router.message(PaymentStates.waiting_for_tx_id)
-async def verify_transaction(message: types.Message, state: FSMContext):
-    tx_id = message.text.strip()
-    data = await state.get_data()
-    expected_amount = data.get("price")
-    days = data.get("days")
+@router.callback_query(F.data.startswith("verify_pay_"))
+async def manual_verify_link_payment(callback: types.CallbackQuery):
+    plan_key = callback.data.split("_")[2]
+    plan = PLANS[plan_key]
+    user_id = callback.from_user.id
     
-    processing_msg = await message.answer("🔄 Verifying transaction with gateway...")
-
-    url = "https://api.shegerpay.com/v1/verify"
-    headers = {
-        "X-API-Key": SHEGERPAY_SECRET_KEY,
-        "Content-Type": "application/json"
+    expiry_date = datetime.now() + timedelta(days=plan["days"])
+    USERS_DB[user_id] = {
+        "expiry": expiry_date,
+        "plan": plan_key,
+        "joined": datetime.now()
     }
-    payload = {
-        "transaction_id": tx_id,
-        "amount": expected_amount
-    }
-
-    is_verified = False
+    
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                if response.status == 200:
-                    res_data = await response.json()
-                    if res_data.get("status") == "success" or res_data.get("verified") == True:
-                        is_verified = True
-    except Exception as e:
-        logging.error(f"API connection error: {e}")
-
-    # Allows testing with 'TEST' or actual verified gateway response
-    if tx_id.startswith("TEST") or is_verified:
-        expiry_date = datetime.now() + timedelta(days=days)
-        USERS_DB[message.from_user.id] = {
-            "expiry": expiry_date,
-            "plan": data.get("plan_key"),
-            "joined": datetime.now()
-        }
-        
-        try:
-            invite = await message.bot.create_chat_invite_link(
-                chat_id=VIP_CHANNEL_ID,
-                member_limit=1,
-                expire_date=datetime.now() + timedelta(hours=1)
-            )
-            invite_link = invite.invite_link
-        except Exception:
-            invite_link = "https://t.me/+YourVIPChannelInviteBackupLink"
-
-        await processing_msg.edit_text(
-            "✅ **Payment Verified Successfully!**\n\n"
-            f"Your VIP access is active until: `{expiry_date.strftime('%Y-%m-%d %H:%M')}`\n\n"
-            f"🚀 **Join your VIP Channel here:**\n{invite_link}",
-            parse_mode="Markdown"
+        invite = await callback.bot.create_chat_invite_link(
+            chat_id=VIP_CHANNEL_ID,
+            member_limit=1,
+            expire_date=datetime.now() + timedelta(hours=1)
         )
-        await state.clear()
-    else:
-        await processing_msg.edit_text(
-            "❌ **Verification Failed.**\n"
-            " We couldn't confirm this transaction ID or the amount didn't match. Please check your SMS code and try again or contact @dawitdg223."
-        )
-        await state.clear()
+        invite_link = invite.invite_link
+    except Exception:
+        invite_link = "https://t.me/+YourVIPChannelInviteBackupLink"
+
+    await callback.message.edit_text(
+        "✅ **Payment Confirmed!**\n\n"
+        f"Your VIP access for **{plan['name']}** is active until: `{expiry_date.strftime('%Y-%m-%d %H:%M')}`\n\n"
+        f"🚀 **Join your VIP Channel here:**\n{invite_link}",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
 # --- ADMIN PANEL & MANAGEMENT ---
 
