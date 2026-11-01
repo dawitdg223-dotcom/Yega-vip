@@ -6,6 +6,7 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from flask import Flask
@@ -59,32 +60,32 @@ async def cmd_start(message: types.Message):
 
 @router.callback_query(F.data == "check_status")
 async def check_status(callback: types.CallbackQuery):
+    await callback.answer()  # Stops button loading animation immediately
     user_id = callback.from_user.id
     if user_id in USERS_DB and USERS_DB[user_id]["expiry"] > datetime.now():
         expiry_str = USERS_DB[user_id]["expiry"].strftime("%Y-%m-%d %H:%M")
         await callback.message.answer(f"✅ Your VIP status is **ACTIVE**.\nExpires on: `{expiry_str}` EAT", parse_mode="Markdown")
     else:
         await callback.message.answer("❌ You do not have an active VIP subscription. Select a plan from /start to join!")
-    await callback.answer()
 
 # --- AUTOMATED SHEGERPAY CHECKOUT LINK GENERATION ---
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()  # Stops button loading animation instantly
     plan_key = callback.data.split("_")[1]
     plan = PLANS[plan_key]
     user_id = callback.from_user.id
     
+    # Send a smooth processing notice
     processing_msg = await callback.message.answer("🔄 Generating your secure ShegerPay payment link...")
 
-    # ShegerPay Initialization API Endpoint (adjust route if needed per official docs)
     url = "https://api.shegerpay.com/v1/transaction/initialize"
     headers = {
         "X-API-Key": SHEGERPAY_SECRET_KEY,
         "Content-Type": "application/json"
     }
     
-    # Payload for generating a checkout link
     payload = {
         "amount": plan["price"],
         "currency": "ETB",
@@ -92,7 +93,6 @@ async def process_buy(callback: types.CallbackQuery, state: FSMContext):
         "first_name": callback.from_user.first_name or "VIP",
         "last_name": callback.from_user.last_name or "Customer",
         "tx_ref": f"yega-{user_id}-{int(datetime.now().timestamp())}",
-        "callback_url": "https://your-bot-domain.onrender.com/webhook/shegerpay", # Optional backend webhook redirect
         "customization": {
             "title": f"Yega VIP - {plan['name']}",
             "description": f"Subscription payment for {plan['name']}"
@@ -105,12 +105,10 @@ async def process_buy(callback: types.CallbackQuery, state: FSMContext):
             async with session.post(url, json=payload, headers=headers) as response:
                 if response.status == 200:
                     res_data = await response.json()
-                    # Expecting ShegerPay to return a checkout URL in their initialization response
                     checkout_url = res_data.get("data", {}).get("checkout_url") or res_data.get("checkout_url")
     except Exception as e:
         logging.error(f"ShegerPay API connection error: {e}")
 
-    # Fallback simulation link if live API call needs specific test parameters or keys
     if not checkout_url:
         checkout_url = f"https://checkout.shegerpay.com/pay/test-{plan['price']}-{user_id}"
 
@@ -128,10 +126,10 @@ async def process_buy(callback: types.CallbackQuery, state: FSMContext):
     )
     
     await processing_msg.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    await callback.answer()
 
 @router.callback_query(F.data == "back_to_start")
 async def back_to_start(callback: types.CallbackQuery):
+    await callback.answer()  # Stops button loading animation immediately
     builder = InlineKeyboardBuilder()
     builder.row(
         types.InlineKeyboardButton(text="🟢 Daily — 15 Birr", callback_data="buy_daily"),
@@ -140,15 +138,18 @@ async def back_to_start(callback: types.CallbackQuery):
     builder.row(types.InlineKeyboardButton(text="🟡 Monthly Pass — 300 Birr", callback_data="buy_monthly"))
     builder.row(types.InlineKeyboardButton(text="📊 My Status", callback_data="check_status"))
     
-    await callback.message.edit_text(
-        "⚽ **Welcome back to Yega VIP Bot!**\n\nChoose your VIP access plan below:",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            "⚽ **Welcome back to Yega VIP Bot!**\n\nChoose your VIP access plan below:",
+            reply_markup=builder.as_markup(),
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
 
 @router.callback_query(F.data.startswith("verify_pay_"))
 async def manual_verify_link_payment(callback: types.CallbackQuery):
+    await callback.answer("Verifying payment...", show_alert=False)
     plan_key = callback.data.split("_")[2]
     plan = PLANS[plan_key]
     user_id = callback.from_user.id
@@ -176,7 +177,6 @@ async def manual_verify_link_payment(callback: types.CallbackQuery):
         f"🚀 **Join your VIP Channel here:**\n{invite_link}",
         parse_mode="Markdown"
     )
-    await callback.answer()
 
 # --- ADMIN PANEL & MANAGEMENT ---
 
@@ -195,6 +195,7 @@ async def admin_panel(message: types.Message):
 async def admin_stats(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
+    await callback.answer()
     
     active_users = sum(1 for uid in USERS_DB if USERS_DB[uid]["expiry"] > datetime.now())
     total_revenue = sum(PLANS[USERS_DB[uid]["plan"]]["price"] for uid in USERS_DB if USERS_DB[uid]["expiry"] > datetime.now())
@@ -210,12 +211,12 @@ async def admin_stats(callback: types.CallbackQuery):
         reply_markup=builder.as_markup(),
         parse_mode="Markdown"
     )
-    await callback.answer()
 
 @router.callback_query(F.data == "admin_users")
 async def admin_users(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
+    await callback.answer()
     
     active_list = [f"• User ID: `{uid}` | Plan: `{info['plan']}` | Exp: `{info['expiry'].strftime('%m-%d %H:%M')}`" 
                    for uid, info in USERS_DB.items() if info["expiry"] > datetime.now()]
@@ -226,18 +227,18 @@ async def admin_users(callback: types.CallbackQuery):
     builder.row(types.InlineKeyboardButton(text="⬅️ Back to Admin Menu", callback_data="admin_back"))
     
     await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-    await callback.answer()
 
 @router.callback_query(F.data == "admin_back")
 async def admin_back(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         return
+    await callback.answer()
+    
     builder = InlineKeyboardBuilder()
     builder.row(types.InlineKeyboardButton(text="📊 View Stats & Revenue", callback_data="admin_stats"))
     builder.row(types.InlineKeyboardButton(text="👥 List Active Users", callback_data="admin_users"))
     
     await callback.message.edit_text("👑 **Admin Control Panel**\nSelect an action:", reply_markup=builder.as_markup(), parse_mode="Markdown")
-    await callback.answer()
 
 # --- BACKGROUND EXPIRY KICKER TASK ---
 async def background_expiry_checker(bot: Bot):
