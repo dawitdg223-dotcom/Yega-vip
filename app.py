@@ -2,11 +2,9 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-import aiohttp
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from flask import Flask
@@ -15,8 +13,9 @@ from threading import Thread
 # --- CONFIGURATION & CREDENTIALS ---
 BOT_TOKEN = "9157386220:AAEpkVOxoiciY-By26pJsbKCYpR0hqBIMyI"
 ADMIN_ID = 5287278470
-SHEGERPAY_SECRET_KEY = "sk_live_Wvbhzuk9fMj8otot_wpszXmn-ecHZrpc"
-SHEGERPAY_PUBLIC_KEY = "pk_live_eGg_nWFqkffUd7uYUaX6TeUeHj4Wm_8c"
+
+# Your reusable ShegerPay Payment Link
+SHEGERPAY_LINK = "https://pay.shegerpay.com/wG9Woidfb19Hsc4i"
 
 # Replace with your actual private VIP channel ID (e.g., -1001234567890)
 VIP_CHANNEL_ID = -1001234567890  
@@ -54,13 +53,13 @@ async def cmd_start(message: types.Message):
     welcome_text = (
         f"👋 Welcome, **{user_name}** to **Yega VIP Bot**!\n\n"
         "⚽ Your trusted source for high-accuracy football multi-bets, accumulators, and expert insights.\n\n"
-        "👇 **Choose a VIP plan below to generate your secure payment link:**"
+        "👇 **Choose your VIP plan below:**"
     )
     await message.answer(welcome_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 @router.callback_query(F.data == "check_status")
 async def check_status(callback: types.CallbackQuery):
-    await callback.answer()  # Stops button loading animation immediately
+    await callback.answer()
     user_id = callback.from_user.id
     if user_id in USERS_DB and USERS_DB[user_id]["expiry"] > datetime.now():
         expiry_str = USERS_DB[user_id]["expiry"].strftime("%Y-%m-%d %H:%M")
@@ -68,68 +67,32 @@ async def check_status(callback: types.CallbackQuery):
     else:
         await callback.message.answer("❌ You do not have an active VIP subscription. Select a plan from /start to join!")
 
-# --- AUTOMATED SHEGERPAY CHECKOUT LINK GENERATION ---
+# --- PAYMENT LINK HANDLER ---
 
 @router.callback_query(F.data.startswith("buy_"))
 async def process_buy(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()  # Stops button loading animation instantly
+    await callback.answer()
     plan_key = callback.data.split("_")[1]
     plan = PLANS[plan_key]
-    user_id = callback.from_user.id
-    
-    # Send a smooth processing notice
-    processing_msg = await callback.message.answer("🔄 Generating your secure ShegerPay payment link...")
-
-    url = "https://api.shegerpay.com/v1/transaction/initialize"
-    headers = {
-        "X-API-Key": SHEGERPAY_SECRET_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "amount": plan["price"],
-        "currency": "ETB",
-        "email": f"user_{user_id}@yegavip.com",
-        "first_name": callback.from_user.first_name or "VIP",
-        "last_name": callback.from_user.last_name or "Customer",
-        "tx_ref": f"yega-{user_id}-{int(datetime.now().timestamp())}",
-        "customization": {
-            "title": f"Yega VIP - {plan['name']}",
-            "description": f"Subscription payment for {plan['name']}"
-        }
-    }
-
-    checkout_url = None
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as response:
-                if response.status == 200:
-                    res_data = await response.json()
-                    checkout_url = res_data.get("data", {}).get("checkout_url") or res_data.get("checkout_url")
-    except Exception as e:
-        logging.error(f"ShegerPay API connection error: {e}")
-
-    if not checkout_url:
-        checkout_url = f"https://checkout.shegerpay.com/pay/test-{plan['price']}-{user_id}"
 
     builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="💳 Pay Now via ShegerPay", url=checkout_url))
+    builder.row(types.InlineKeyboardButton(text="💳 Pay via ShegerPay", url=SHEGERPAY_LINK))
     builder.row(types.InlineKeyboardButton(text="✅ I Have Paid — Verify Access", callback_data=f"verify_pay_{plan_key}"))
     builder.row(types.InlineKeyboardButton(text="⬅️ Back to Plans", callback_data="back_to_start"))
 
     instructions = (
         f"💳 **Selected Plan:** {plan['name']}\n"
-        f"💰 **Amount:** `{plan['price']} Birr`\n\n"
-        f"1️⃣ Tap the **'Pay Now via ShegerPay'** button below to open the secure checkout page.\n"
-        f"2️⃣ Complete your payment safely through the gateway.\n"
-        f"3️⃣ Once done, tap **'I Have Paid — Verify Access'** below!"
+        f"💰 **Amount to Pay:** `{plan['price']} Birr`\n\n"
+        f"1️⃣ Tap **'Pay via ShegerPay'** below to open the secure payment page.\n"
+        f"2️⃣ Complete your payment of **{plan['price']} Birr**.\n"
+        f"3️⃣ Once done, come back here and tap **'I Have Paid — Verify Access'**!"
     )
     
-    await processing_msg.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await callback.message.edit_text(instructions, reply_markup=builder.as_markup(), parse_mode="Markdown")
 
 @router.callback_query(F.data == "back_to_start")
 async def back_to_start(callback: types.CallbackQuery):
-    await callback.answer()  # Stops button loading animation immediately
+    await callback.answer()
     builder = InlineKeyboardBuilder()
     builder.row(
         types.InlineKeyboardButton(text="🟢 Daily — 15 Birr", callback_data="buy_daily"),
@@ -243,7 +206,7 @@ async def admin_back(callback: types.CallbackQuery):
 # --- BACKGROUND EXPIRY KICKER TASK ---
 async def background_expiry_checker(bot: Bot):
     while True:
-        await asyncio.sleep(3600)  # Check every hour
+        await asyncio.sleep(3600)
         now = datetime.now()
         for user_id, info in list(USERS_DB.items()):
             if info["expiry"] < now:
@@ -271,10 +234,8 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     
-    # Start background expiry checking task
     asyncio.create_task(background_expiry_checker(bot))
     
-    # Start Flask web server in a background thread to satisfy Render port binding requirements
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
